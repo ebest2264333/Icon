@@ -450,14 +450,20 @@ function syncBase(){
   if(!/^https:\/\//.test(u)) u='https://'+u;
   return u+'/academies/'+encodeURIComponent(store.sync.code.trim());
 }
-async function fbGet(path){ const r=await fetch(syncBase()+path+'.json'); if(!r.ok){ let body=''; try{ body=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(body?' — '+body.slice(0,200):'')); } return r.json(); }
-async function fbPut(path, data){ const r=await fetch(syncBase()+path+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}); if(!r.ok){ let body=''; try{ body=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(body?' — '+body.slice(0,200):'')); } return r.json(); }
-async function fbDel(path){ await fetch(syncBase()+path+'.json',{method:'DELETE'}); }
+function fbFetch(url, opts, timeoutMs){
+  // 응답이 없이 무한정 멈춰있지 않도록(느린 회선 등) 일정 시간(기본 20초) 지나면 확실한 시간초과 오류로 실패 처리
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(), timeoutMs||20000);
+  return fetch(url, {...(opts||{}), signal:ctrl.signal}).finally(()=>clearTimeout(timer));
+}
+async function fbGet(path, timeoutMs){ let r; try{ r=await fbFetch(syncBase()+path+'.json', null, timeoutMs); }catch(e){ throw (e&&e.name==='AbortError') ? new Error('서버 응답 시간초과(네트워크 확인)') : e; } if(!r.ok){ let body=''; try{ body=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(body?' — '+body.slice(0,200):'')); } return r.json(); }
+async function fbPut(path, data, timeoutMs){ let r; try{ r=await fbFetch(syncBase()+path+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}, timeoutMs); }catch(e){ throw (e&&e.name==='AbortError') ? new Error('서버 응답 시간초과(네트워크 확인)') : e; } if(!r.ok){ let body=''; try{ body=await r.text(); }catch(e){} throw new Error('HTTP '+r.status+(body?' — '+body.slice(0,200):'')); } return r.json(); }
+async function fbDel(path){ try{ await fbFetch(syncBase()+path+'.json',{method:'DELETE'}); }catch(e){} }
 function toast(msg){ const el=document.getElementById('saved'); el.textContent=msg; el.classList.add('show');
   clearTimeout(saveTimer); saveTimer=setTimeout(()=>{el.classList.remove('show'); el.textContent='저장됨 ✓';},2200); }
 
 let UPFILTER=null; // 학원별 마스터 업로드 시 해당 학원 시트만 반영
-let pushTimer=null, syncBusy=false;
+let pushTimer=null, syncBusy=false, pullBusy=false, lastSyncError=null;
 function schedulePushShared(){
   if(!syncOn()) return;
   clearTimeout(pushTimer);
@@ -575,8 +581,10 @@ function mergeById(localArr, remoteArr){
 }
 async function pullShared(silent){
   if(!syncOn()) return;
+  if(pullBusy) return; // 이전 수신이 아직 안 끝났으면 겹쳐서 또 요청하지 않는다 — 느린 회선에서 5초마다 계속 겹쳐 쌓이면 그때마다 실패해서 오류가 끊임없이 뜨는 원인이 됨
+  pullBusy=true;
   try{
-    const pack=await fbGet('/shared');
+    const pack=await fbGet('/shared', 12000); // 5초 주기 폴링이라 타임아웃도 짧게(12초) — 오래 걸리는 요청이 다음 주기와 겹치지 않도록
     if(pack && pack.updatedAt && pack.updatedAt>(store.sharedAt||0)){
       const rStamps=pack.fieldStamps||{};
       const lStamps=store.fieldStamps||{};
@@ -597,7 +605,13 @@ async function pullShared(silent){
       refreshMonthSel(); refreshLoginSel(); render(true);
       if(!silent) toast('☁ 학원 자료 자동 적용됨');
     }
-  }catch(e){ console.warn('sync pull 실패', e); toast('⚠ 수신 실패: '+e.message); }
+    lastSyncError=null;
+  }catch(e){
+    console.warn('sync pull 실패', e);
+    const isNewErr = lastSyncError!==e.message; // 같은 오류가 5초마다 반복 표시되어 계속 뜨는 것처럼 보이지 않도록, 오류 내용이 바뀔 때만 알림을 띄운다
+    lastSyncError=e.message;
+    if(isNewErr) toast('⚠ 수신 실패: '+e.message);
+  } finally { pullBusy=false; }
 }
 async function pushSubmission(pack){
   if(!syncOn()) return false;
