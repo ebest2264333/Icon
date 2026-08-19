@@ -367,7 +367,7 @@ if(!store.daysedit) store.daysedit={};
 if(!store.calendar) store.calendar=[];
 if(!store.meetings) store.meetings=[];
 if(!store.meetingReadIds) store.meetingReadIds={}; // 기기별 로컬 읽음 표시 (동기화 대상 아님)
-if(!store.sync) store.sync={url:'https://ebest-b41ce-default-rtdb.asia-southeast1.firebasedatabase.app',code:'icon-3s3t5o2u6q1e2nux6r1y1l3w',on:true};
+if(!store.sync) store.sync={url:'https://ebest-b41ce-default-rtdb.asia-southeast1.firebasedatabase.app',code:'icon-3s3t5o2u6q1e2nux6r1y1l3w',on:true}; // 새 기기에서 열면 자동으로 동기화 연결됨 (배포 편의를 위한 의도된 동작)
 else { if(!store.sync.url) store.sync.url='https://ebest-b41ce-default-rtdb.asia-southeast1.firebasedatabase.app'; if(!store.sync.code) store.sync.code='icon-3s3t5o2u6q1e2nux6r1y1l3w'; if(store.sync.on==null) store.sync.on=true; }
 if(store.adminPw==null) store.adminPw='';
 if(!store.timeedit) store.timeedit={};
@@ -407,7 +407,9 @@ if(!store.wordTests) store.wordTests=[];
 if(!store.sharedAt) store.sharedAt=0;
 if(!store.inboxDone) store.inboxDone={};
 if(!store.boardPosts) store.boardPosts=[]; // 게시판(오류 제보·1:1 문의·공지) — {id, kind:'issue'|'ask'|'notice', title, body, authorName, authorAcademy, private, createdAt, replies:[{body,authorName,createdAt}], resolved}
-const SHARE_FIELDS=['uploads','bookedit','bookdone','daysedit','timeedit','calendar','meetings','teachers','adminEmail','enrollment','newStudents','students','admissionConsults','wordTests','attend','homework','stayback','bookGiven','uploadTombstones','uploadStamps','wordbookOptions','testPaperOptions','giveSel','consultRequests','records','assign','cmemo','worklog','weekplan','submits','handover','boardPosts'];
+if(!store.weeklyTimetable) store.weeklyTimetable={icon:{}}; // 아이콘 전용: 주마다 바뀌는 실제 시간표(반·요일·과목)를 원본 엑셀에서 그대로 인식해 주(週) 단위로 저장 — 이베스트는 해당 없음, 절대 이 키에 쓰지 않는다
+if(!store.weeklyTimetable.icon) store.weeklyTimetable.icon={};
+const SHARE_FIELDS=['uploads','bookedit','bookdone','daysedit','timeedit','calendar','meetings','teachers','adminEmail','enrollment','newStudents','students','admissionConsults','wordTests','attend','homework','stayback','bookGiven','uploadTombstones','uploadStamps','wordbookOptions','testPaperOptions','giveSel','consultRequests','records','assign','cmemo','worklog','weekplan','submits','handover','boardPosts','weeklyTimetable'];
 // 반 자료·학생 명단처럼 "삭제"가 중요한 항목은 병합하지 않고 통째로 교체한다(마지막 저장이 우선).
 // 병합 방식(mergeById)에는 삭제라는 개념이 없어서, 지운 반·학생이 다른 기기 자료와 합쳐지며 계속 되살아나기 때문.
 const REPLACE_FIELDS=['uploads','students','teachers','bookedit','bookdone','daysedit','timeedit','wordbookOptions','testPaperOptions'];
@@ -434,10 +436,25 @@ if(!store.teachersIdMigrated){
 }
 // 단어시험 담당(선생님 순번→고유id 변환)은 반 자료를 실제로 불러올 때(editArr) 그때그때 처리합니다.
 let saveTimer=null;
+let syncSnap=null;
 function save(){
   // 어떤 값이든 바뀌면 그 즉시 이 기기에 저장되고, 곧바로 서버로도 올라간다(글자 하나만 고쳐도 반영)
+  // [수정] 예전엔 저장할 때마다 REPLACE_FIELDS 전부를 "방금 편집함"으로 찍어버려서, 그 항목을 전혀
+  // 건드리지 않은 저장(예: 다른 화면 클릭)까지도 "이 기기가 제일 최신"으로 착각하게 만들었다.
+  // 그 결과 다른 선생님이 방금 고친 내용을, 그 사람의 화면과 무관한 내 저장 한 번이 다시 덮어써버리는
+  // "고쳤는데 자꾸 원래대로 돌아가는" 동기화 버그가 생겼다. 이제는 실제로 내용이 바뀐 항목만 찍는다.
   store.fieldStamps=store.fieldStamps||{};
-  REPLACE_FIELDS.forEach(f=>{ store.fieldStamps[f]=Date.now(); });
+  if(!syncSnap){
+    // 이번 페이지를 켠 뒤 처음 저장하는 순간 — 지금 상태를 그냥 기준점으로만 삼고 도장은 찍지 않는다
+    // (새로고침 직후엔 실제로 아무것도 안 바꿨는데 "방금 편집함"으로 잘못 찍히는 걸 막기 위함)
+    syncSnap={};
+    REPLACE_FIELDS.forEach(f=>{ syncSnap[f]=JSON.stringify(store[f]); });
+  } else {
+    REPLACE_FIELDS.forEach(f=>{
+      const cur=JSON.stringify(store[f]);
+      if(syncSnap[f]!==cur){ store.fieldStamps[f]=Date.now(); syncSnap[f]=cur; }
+    });
+  }
   localStorage.setItem(KEY, JSON.stringify(store));
   const el=document.getElementById('saved'); el.classList.add('show');
   clearTimeout(saveTimer); saveTimer=setTimeout(()=>el.classList.remove('show'),900);
@@ -531,6 +548,7 @@ async function pushShared(){
           if((rStamps[f]||0) > (lStamps[f]||0)){
             store[f]=remotePack[f];
             store.fieldStamps=store.fieldStamps||{}; store.fieldStamps[f]=rStamps[f];
+            syncSnap=syncSnap||{}; syncSnap[f]=JSON.stringify(remotePack[f]); // 방금 서버에서 받아온 내용이니, 다음 저장 때 '내가 방금 고쳤다'고 착각해 다시 찍어누르지 않도록 기준점도 같이 맞춰둔다
           }
           return;
         }
@@ -595,6 +613,7 @@ async function pullShared(silent){
           if((rStamps[f]||0) > (lStamps[f]||0)){
             store[f]=pack[f];
             store.fieldStamps=store.fieldStamps||{}; store.fieldStamps[f]=rStamps[f];
+            syncSnap=syncSnap||{}; syncSnap[f]=JSON.stringify(pack[f]); // 방금 서버에서 받아온 내용이니, 다음 저장 때 '내가 방금 고쳤다'고 착각해 다시 찍어누르지 않도록 기준점도 같이 맞춰둔다
           }
           return;
         }
@@ -644,9 +663,9 @@ function startSyncLoop(){
   // (2번 켰다 끄면 5초마다 2배, 3배로 계속 요청이 늘어남) 하루 만에 다운로드량이 폭증하는 원인이 됐다.
   // 그래서 새로 걸기 전에 기존 타이머부터 반드시 정리한다.
   if(__pullTimerId) clearInterval(__pullTimerId);
-  // 다른 사람이 바꾼 내용도 빨리 보이도록 5초마다 확인
-  if(MODE==='all'){ pollInbox(); __pullTimerId=setInterval(()=>{ pullShared(false); pollInbox(); }, 5000); }
-  else __pullTimerId=setInterval(()=>pullShared(false), 5000);
+  // 다른 사람이 바꾼 내용도 보이도록 1분마다 확인 (너무 자주 돌리면 트래픽이 크게 늘어나서 1분으로 완화)
+  if(MODE==='all'){ pollInbox(); __pullTimerId=setInterval(()=>{ pullShared(false); pollInbox(); }, 60000); }
+  else __pullTimerId=setInterval(()=>pullShared(false), 60000);
   if(__syncLoopStarted) return;
   __syncLoopStarted=true;
   document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ pullShared(true); if(MODE==='all') pollInbox(); } });
@@ -1839,7 +1858,7 @@ function updateStudentField(id, field, value){
   if(field==='status' && (value==='퇴원'||value==='휴원')){
     // 반 배정을 취소한다 — 단, 지난 달들의 기록(출결·단어시험 등 히스토리)은 그대로 보이게 최신·현재 보는 달만 정리한다
     // (휴원·퇴원 학생을 반 명단에서 완전히 지워버리면 지난 학습 기록을 볼 방법이 없어지므로, 삭제가 아니라 '현재 활성 배정만 취소'하는 개념)
-    removeStudentFromActiveRosters(s.academy, s.nameKo);
+    removeStudentFromActiveRosters(s.academy, s.nameKo, s.nameEn);
     if(value==='퇴원') s.className=''; // 퇴원은 반 배정 자체를 비운다 (휴원은 나중에 같은 반으로 복귀할 수 있어 className은 유지)
   }
   if(field==='className') syncStudentClassRoster(s, oldClassName, null);
@@ -1851,26 +1870,43 @@ function updateStudentField(id, field, value){
   if(field==='absFrom' && value && !s.absTo) s.absTo=value; // 끝나는 날짜를 안 적으면 하루만 결석으로 처리
   save(); render(true);
 }
-function removeStudentFromActiveRosters(academy, nameKo){
+function rosterNameMatchesStudent(raw, nameKo, nameEn){
+  // 반 명단엔 "영어(한글)" 또는 "한글(영어)" 형태로 저장돼 있는데, 예전 코드는 한글 이름 하나만 정확히 일치할 때만 지웠다.
+  // 그래서 "Ruby(고은솔)"처럼 괄호 형식으로 저장된 반 명단은 학생을 삭제해도 실제로는 하나도 안 지워지고 계속 "더미"로 남아있었다.
+  const raw2=String(raw||'').trim();
+  if(!raw2) return false;
+  if(nameKo && raw2===nameKo) return true;
+  if(nameEn && raw2===nameEn) return true;
+  const m=raw2.match(/^(.*?)\(([^)]+)\)\s*$/);
+  if(m){
+    const before=m[1].trim(), inside=m[2].trim();
+    if(nameKo && (before===nameKo || inside===nameKo)) return true;
+    if(nameEn && (before===nameEn || inside===nameEn)) return true;
+  }
+  return false;
+}
+function removeStudentFromActiveRosters(academy, nameKo, nameEn){
   // 휴원·퇴원 시 "현재 활성" 배정만 취소한다 (최신 달 + 지금 보고 있는 달) — 지난 달 반 명단·기록은 그대로 남겨 히스토리를 보존한다
   targetSyncMonths(academy).forEach(month=>{
     const arr=editArr(academy, month);
     arr.forEach(c=>{
       if(!c.students || !c.students.length) return;
-      const idx=c.students.indexOf(nameKo);
-      if(idx>=0){ c.students.splice(idx,1); c.count=c.students.length; c.updatedAt=Date.now(); }
+      const before=c.students.length;
+      c.students=c.students.filter(sname=>!rosterNameMatchesStudent(sname, nameKo, nameEn));
+      if(c.students.length!==before){ c.count=c.students.length; c.updatedAt=Date.now(); }
     });
   });
 }
-function purgeStudentFromAllRosters(academy, nameKo){
+function purgeStudentFromAllRosters(academy, nameKo, nameEn){
   // 학생을 완전히 삭제할 때는, 남아있는 반 배정(더미 데이터)이 없도록 그 학원의 모든 달(月) 자료에서 이름을 지운다
   // (removeStudentFromActiveRosters는 최신 달·현재 보는 달만 정리해서, 완전 삭제 시에는 부족할 수 있음)
   monthsOf(academy).forEach(month=>{
     const arr=editArr(academy, month);
     arr.forEach(c=>{
       if(!c.students || !c.students.length) return;
-      const idx=c.students.indexOf(nameKo);
-      if(idx>=0){ c.students.splice(idx,1); c.count=c.students.length; c.updatedAt=Date.now(); }
+      const before=c.students.length;
+      c.students=c.students.filter(sname=>!rosterNameMatchesStudent(sname, nameKo, nameEn));
+      if(c.students.length!==before){ c.count=c.students.length; c.updatedAt=Date.now(); }
     });
   });
 }
@@ -1879,7 +1915,7 @@ function removeStudentRecord(id){
   store.students.forEach(x=>{ if(x.siblings) x.siblings=x.siblings.filter(sid=>sid!==id); });
   const s=store.students.find(x=>x.id===id);
   if(s){
-    purgeStudentFromAllRosters(s.academy, s.nameKo);
+    purgeStudentFromAllRosters(s.academy, s.nameKo, s.nameEn);
     s._deleted=true; s.updatedAt=Date.now();
   }
   save(); render(true);
@@ -2383,6 +2419,34 @@ function markRetestDone(id){
   save(); render(true);
 }
 const WORDBOOK_OPTIONS_DEFAULT=['초등 베이직','초등 컴플리트','중등 실력','중등 고난도','고등 베이직','수능 2000','하이스트','하이퍼'];
+function wbOptionsFor(a){
+  // 이베스트·아이콘은 단어장 목록이 완전히 다르므로 학원별로 따로 관리한다 — 예전엔 하나의 목록을 같이 써서
+  // 한쪽(예: 아이콘)에서 지우면 다른 학원(이베스트) 목록에서도 같이 지워지는 문제가 있었다.
+  const w=store.wordbookOptions;
+  if(w && typeof w==='object' && !Array.isArray(w)) return (w[a]&&w[a].length)?w[a]:WORDBOOK_OPTIONS_DEFAULT;
+  return (Array.isArray(w)&&w.length)?w:WORDBOOK_OPTIONS_DEFAULT;
+}
+function tpOptionsFor(a){
+  const w=store.testPaperOptions;
+  if(w && typeof w==='object' && !Array.isArray(w)) return w[a]||[];
+  return Array.isArray(w)?w:[];
+}
+function setWbOptions(a, arr){
+  if(!store.wordbookOptions || Array.isArray(store.wordbookOptions)){
+    const legacy=Array.isArray(store.wordbookOptions)?store.wordbookOptions:null;
+    store.wordbookOptions={};
+    academies().forEach(x=>{ store.wordbookOptions[x]=legacy?[...legacy]:[...WORDBOOK_OPTIONS_DEFAULT]; });
+  }
+  store.wordbookOptions[a]=arr;
+}
+function setTpOptions(a, arr){
+  if(!store.testPaperOptions || Array.isArray(store.testPaperOptions)){
+    const legacy=Array.isArray(store.testPaperOptions)?store.testPaperOptions:null;
+    store.testPaperOptions={};
+    academies().forEach(x=>{ store.testPaperOptions[x]=legacy?[...legacy]:[]; });
+  }
+  store.testPaperOptions[a]=arr;
+}
 const WORDLANG_OPTIONS=['한글','믹스','영어'];
 function wtStudentRow(s, date){
   let r=store.wordTests.find(x=>x.studentId===s.id && x.date===date);
@@ -2394,7 +2458,7 @@ function wtStudentRow(s, date){
   const dim = r.absent ? 'opacity:.5' : '';
   const wbSel=`<select data-wtfield="${s.id}|wordbook" ${r.absent?'disabled':''} style="width:120px;padding:5px 8px;border:1.5px solid var(--line);border-radius:8px;font-family:inherit;font-size:.82rem;${dim}">
     <option value="">단어장 선택</option>
-    ${(store.wordbookOptions&&store.wordbookOptions.length?store.wordbookOptions:WORDBOOK_OPTIONS_DEFAULT).map(o=>`<option value="${esc(o)}" ${r.wordbook===o?'selected':''}>${esc(o)}</option>`).join('')}
+    ${wbOptionsFor(s.academy).map(o=>`<option value="${esc(o)}" ${r.wordbook===o?'selected':''}>${esc(o)}</option>`).join('')}
   </select>`;
   const langSel=`<select data-wtfield="${s.id}|lang" ${r.absent?'disabled':''} style="width:76px;padding:5px 8px;border:1.5px solid var(--line);border-radius:8px;font-family:inherit;font-size:.82rem;${dim}">
     <option value="">유형</option>
@@ -2647,8 +2711,8 @@ function renderBookGive(list){
     ${lt?`<span class="mytag" style="background:${lt.t.color}">👤 ${esc(lt.t.name)}</span><label class="hwlab"><input type="checkbox" id="bgMyOnly" ${state.myOnly?'checked':''}> 내 수업만 보기</label>`:''}
     <span style="font-size:.76rem;color:var(--sub)">학생을 체크하고 [배부 처리]를 누르면 반교재·연간교재 탭에도 실시간으로 반영됩니다. 실장 이상 누구나 입력할 수 있어요.</span></div>`;
   if(!cls.length) return h+'<div class="empty">학생이 등록된 반이 없습니다.</div>';
-  const wbOpts=(store.wordbookOptions&&store.wordbookOptions.length)?store.wordbookOptions:WORDBOOK_OPTIONS_DEFAULT;
-  const tpOpts=(store.testPaperOptions&&store.testPaperOptions.length)?store.testPaperOptions:[];
+  const wbOpts=wbOptionsFor(MODE);
+  const tpOpts=tpOptionsFor(MODE);
   cls.forEach(c=>{
     const k=ckey(c);
     const effStu=effStudentsForGive(c);
@@ -3325,6 +3389,42 @@ function matchStudentByRosterName(academy, sname, className){
     if(cands.length) return cands[0];
   }
   return null;
+}
+function parseRosterName(raw){
+  // 반 명단 문자열("Ruby(고은솔)" 또는 "고은솔(Ruby)")을 한글/영어 이름으로 분리한다.
+  const s=String(raw||'').trim();
+  const isKo=t=>/[가-힣]/.test(t);
+  const m=s.match(/^(.*?)\(([^)]+)\)\s*$/);
+  if(!m) return {nameKo:s, nameEn:''};
+  const before=m[1].trim(), inside=m[2].trim();
+  if(isKo(inside) && !isKo(before)) return {nameKo:inside, nameEn:before};
+  if(isKo(before) && !isKo(inside)) return {nameKo:before, nameEn:inside};
+  return {nameKo: isKo(before)?before:s, nameEn: isKo(before)?inside:''};
+}
+function backfillStudentsFromRosters(){
+  // 엑셀 업로드 등으로 반 명단(c.students)에는 이름이 들어갔는데, 학생 명단(store.students)엔 해당 학생의
+  // 상세 레코드가 아예 없는 경우를 찾아서 최소 정보(이름·반)로 자동 생성해준다.
+  if(!isAdminRole()) return {created:0};
+  let created=0;
+  academies().forEach(a=>{
+    monthsOf(a).forEach(m=>{
+      editArr(a,m).forEach(c=>{
+        if(c._deleted || !c.students || !c.students.length) return;
+        c.students.forEach(sname=>{
+          const st=matchStudentByRosterName(a, sname, c.name);
+          if(st) return;
+          const {nameKo,nameEn}=parseRosterName(sname);
+          if(!nameKo) return;
+          const dupe=store.students.find(x=>x.academy===a && !x._deleted && x.nameKo===nameKo && (x.nameEn||'')===(nameEn||'') && x.className===c.name);
+          if(dupe) return;
+          store.students.push({id:genStudentId(), academy:a, nameKo, nameEn, className:c.name, grade:'', school:'',
+            parentPhone:'', preCheck:'', note:'', status:'재원', statusReason:'', siblings:[], createdAt:todayISO(), updatedAt:Date.now()});
+          created++;
+        });
+      });
+    });
+  });
+  return {created};
 }
 function isWithdrawnRosterName(academy, sname, className){
   // 반 명단에는 남아있지만(과거 기록 보존용) 학생명단 상태가 '퇴원'인 이름 — 오늘 기록 등 활성 화면에서는 제외 대상으로 판별
@@ -5494,10 +5594,11 @@ function archData(){
     const w=whoTeacher(who); if(!w) continue;
     for(const d in store.worklog[who]){
       if(state.arMonth && !d.startsWith(state.arMonth)) continue;
-      const e=store.worklog[who][d];
-      const filled=e.today.filter(x=>x.t).length+e.monthly.filter(x=>x.t).length+e.weekly.filter(x=>x.t).length;
-      if(!filled && !e.lessons.length) continue;
-      journals.push({who,w,d,today:e.today.filter(x=>x.t).length,done:e.today.filter(x=>['완료','O'].includes(x.r)).length,lessons:e.lessons.filter(L=>L.cls).length});
+      const e=store.worklog[who][d]; if(!e) continue;
+      const eToday=e.today||[], eMonthly=e.monthly||[], eWeekly=e.weekly||[], eLessons=e.lessons||[];
+      const filled=eToday.filter(x=>x.t).length+eMonthly.filter(x=>x.t).length+eWeekly.filter(x=>x.t).length;
+      if(!filled && !eLessons.length) continue;
+      journals.push({who,w,d,today:eToday.filter(x=>x.t).length,done:eToday.filter(x=>['완료','O'].includes(x.r)).length,lessons:eLessons.filter(L=>L.cls).length});
     }
   }
   journals.sort((x,y)=>y.d.localeCompare(x.d));
@@ -5508,7 +5609,8 @@ function archData(){
     const w=whoTeacher(who); if(!w) continue;
     for(const wk in store.weekplan[who]){
       if(state.arMonth && !wk.startsWith(state.arMonth)) continue;
-      const rows=store.weekplan[who][wk].rows.filter(r=>r.cls);
+      const wp=store.weekplan[who][wk]; if(!wp) continue;
+      const rows=(wp.rows||[]).filter(r=>r.cls);
       if(rows.length) plans.push({who,w,wk,n:rows.length});
     }
   }
@@ -5525,7 +5627,7 @@ function archData(){
       const who=(ti!=null)?a+'|'+ti:null;
       if(state.arWho && who!==state.arWho) continue;
       for(const s in store.records[mo][k]){
-        const r=store.records[mo][k][s];
+        const r=store.records[mo][k][s]; if(!r) continue;
         if(r.done||r.memo) consults.push({mo,a,name,s,t,date:r.date||'',memo:r.memo||''});
       }
     }
@@ -5705,11 +5807,24 @@ function renderSet(){
       </div>`).join(''):'<div style="font-size:.82rem;color:#8b93a7">중복된 반이 없습니다.</div>'}
     </div>`;
   }
+  // 🧩 반 명단 → 학생 명단 채우기 — 엑셀 업로드 등으로 반에는 이름이 있는데 학생명단엔 상세 레코드가 없는 경우 (관리자·실장만)
+  if(!isTeacher){
+    let missCount=0;
+    academies().forEach(a=>{ monthsOf(a).forEach(m=>{ editArr(a,m).forEach(c=>{
+      if(c._deleted||!c.students) return;
+      c.students.forEach(sname=>{ if(!matchStudentByRosterName(a,sname,c.name)) missCount++; });
+    }); }); });
+    h+=`<div class="setsec" style="border:2px solid #2e5fb7"><h3>🧩 반 명단 → 학생 명단 채우기 <span style="font-size:.74rem;font-weight:400;color:var(--sub)">(${missCount}건)</span></h3>
+      <div class="desc">엑셀로 반을 업로드하면 반 안에는 이름이 들어가지만, 학생 명단(연락처·특이사항 등 상세 정보)에는 자동으로 안 생겨서 따로 채워야 합니다. 아래 버튼을 누르면 반 명단에만 있고 학생 명단엔 없는 이름을 찾아 최소 정보(이름·반)로 자동 등록합니다. (앞으로는 엑셀 업로드 시 자동으로 같이 채워집니다)</div>
+      ${missCount?`<button class="btn small primary" id="backfillStudentsBtn">🧩 지금 바로 채우기 (${missCount}건)</button>`:'<div style="font-size:.82rem;color:#8b93a7">비어있는 학생이 없습니다.</div>'}
+    </div>`;
+  }
   // 👻 유령(더미) 학생 정리 — 학생명단에서 완전히 삭제됐는데 반 카드에 이름만 남아있는 경우 (관리자·실장만) — 휴원·퇴원은 대상에서 제외
   if(!isTeacher){
     const ghosts=findGhostRosterEntries();
     h+=`<div class="setsec" style="border:2px solid #c0392b"><h3>👻 유령(더미) 학생 정리 <span style="font-size:.74rem;font-weight:400;color:var(--sub)">(${ghosts.length}건)</span></h3>
       <div class="desc">학생명단에서 완전히 삭제됐는데 반 카드에는 이름이 그대로 남아 오늘 기록·단어시험 등에 더미로 뜨는 경우를 찾아줍니다. (휴원·퇴원 학생은 일정 기간 반 명단에 남아있는 게 정상이라 여기 표시되지 않습니다) 확인 후 지워주세요.</div>
+      ${ghosts.length?`<div style="margin-bottom:8px"><button class="btn small" style="color:#c0392b;border-color:#e7b3ab" id="ghostDelAll">🗑 전부 한 번에 정리 (${ghosts.length}건)</button></div>`:''}
       ${ghosts.length?ghosts.map(g=>`<div class="rowitem" style="align-items:center">
         <span class="key">${esc(g.sname)} <span style="font-weight:400;color:var(--sub);font-size:.78rem">[${AC[g.academy].label} · ${mLabel(g.month)} · ${esc(g.className)}] · ${esc(g.reason)}</span></span>
         <span class="val"><button class="btn small" style="color:#c0392b;border-color:#e7b3ab" data-ghostdel="${g.academy}|${g.month}|${esc(g.classId||'')}|${esc(g.sname)}">🗑 이 반에서 제거</button></span></div>`).join(''):'<div style="font-size:.82rem;color:#8b93a7">더미로 남은 학생이 없습니다.</div>'}
@@ -5740,6 +5855,21 @@ function renderSet(){
       :'<div style="font-size:.8rem;color:#8b93a7">아직 업로드한 자료가 없습니다.</div>'}
   </div>`;
   else h+=`<input type="file" id="upFile" accept=".xlsx,.xls" style="display:none">`;
+  // 📅 아이콘 주별 시간표 — 원본 시간표 엑셀에서 주마다 자동 인식된 실제 시간표 (관리자·실장만)
+  if(!isTeacher){
+    const wtWeeks=(store.weeklyTimetable&&store.weeklyTimetable.icon)||{};
+    const wtKeys=Object.keys(wtWeeks).sort();
+    const wtToday=todayISO();
+    const wtCur=wtKeys.find(k=>{ const w=wtWeeks[k]; return w.start&&w.end&&wtToday>=w.start&&wtToday<=w.end; })||wtKeys[wtKeys.length-1]||'';
+    h+=`<div class="setsec" style="border:2px solid #6366f1"><h3>📅 아이콘 주별 시간표 <span style="font-size:.74rem;font-weight:400;color:var(--sub)">(자동 인식 ${wtKeys.length}주)</span></h3>
+      <div class="desc">아이콘 원본 시간표 엑셀(「(26)N월|시간표」 시트)을 위 「엑셀 파일 업로드」로 올리면, 주마다 바뀌는 반·시간을 주 단위로 자동 인식해서 저장합니다. 토·일요일 특강 주도 함께 인식됩니다. 이베스트 자료에는 전혀 영향을 주지 않습니다.</div>
+      ${wtKeys.length?`<select id="wtWeekSel" style="padding:7px 9px;border:1.5px solid var(--line);border-radius:8px;font-family:inherit;margin-bottom:10px">
+        ${wtKeys.map(k=>`<option value="${esc(k)}" ${k===wtCur?'selected':''}>${k===wtCur?'📍 ':''}${esc(wtWeeks[k].label||k)}</option>`).join('')}
+      </select>
+      <div id="wtWeekView">${renderWeeklyTimetableTable(wtWeeks[wtCur])}</div>`
+      :'<div style="font-size:.82rem;color:#8b93a7">아직 인식된 주별 시간표가 없습니다. 위 「엑셀 파일 업로드」로 아이콘 원본 시간표 파일을 올려주세요.</div>'}
+    </div>`;
+  }
   // 선생님 (관리자·실장만 편집 가능, 일반 선생님은 이름·색상만 조회)
   const canEditTeachers = isAdminRole();
   for(const a of academies()){
@@ -5827,7 +5957,7 @@ function renderSet(){
   if(!isTeacher) h+=`<div class="setsec"><h3>📖 단어장 목록 관리</h3>
     <div class="desc">단어시험 입력·교재 배부 시 선택할 수 있는 단어장 목록입니다. 추가·삭제하면 모든 선생님 화면에 바로 반영됩니다.</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
-      ${(store.wordbookOptions&&store.wordbookOptions.length?store.wordbookOptions:WORDBOOK_OPTIONS_DEFAULT).map((o,i)=>`<span class="stu">${esc(o)} <b data-wbdel="${i}" style="cursor:pointer;color:#c0392b;margin-left:3px">×</b></span>`).join('')}
+      ${wbOptionsFor(MODE).map((o,i)=>`<span class="stu">${esc(o)} <b data-wbdel="${i}" style="cursor:pointer;color:#c0392b;margin-left:3px">×</b></span>`).join('')}
     </div>
     <div style="display:flex;gap:6px">
       <input type="text" id="wbAddIn" placeholder="새 단어장 이름 (예: 중등 심화)" style="flex:1;min-width:140px;padding:6px 9px;border:1.5px solid var(--line);border-radius:8px;font-family:inherit;font-size:.86rem">
@@ -5837,7 +5967,7 @@ function renderSet(){
   if(!isTeacher) h+=`<div class="setsec"><h3>📝 단어 시험지 목록 관리</h3>
     <div class="desc">[교재 배부] 탭에서 선택할 수 있는 단어 시험지 목록입니다. 추가·삭제하면 모든 선생님 화면에 바로 반영됩니다.</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
-      ${(store.testPaperOptions||[]).map((o,i)=>`<span class="stu">${esc(o)} <b data-tpdel="${i}" style="cursor:pointer;color:#c0392b;margin-left:3px">×</b></span>`).join('') || '<span style="font-size:.82rem;color:#8b93a7">등록된 시험지가 없습니다.</span>'}
+      ${tpOptionsFor(MODE).map((o,i)=>`<span class="stu">${esc(o)} <b data-tpdel="${i}" style="cursor:pointer;color:#c0392b;margin-left:3px">×</b></span>`).join('') || '<span style="font-size:.82rem;color:#8b93a7">등록된 시험지가 없습니다.</span>'}
     </div>
     <div style="display:flex;gap:6px">
       <input type="text" id="tpAddIn" placeholder="새 시험지 이름 (예: 단원평가 3회)" style="flex:1;min-width:140px;padding:6px 9px;border:1.5px solid var(--line);border-radius:8px;font-family:inherit;font-size:.86rem">
@@ -5941,6 +6071,125 @@ function parseWorkbook(wb){
   });
   return {found, yearly, skipped};
 }
+// 아이콘 원본 시간표 시트("(26)7월|시간표" 등)를 인식해 주(週) 단위로 실제 시간표를 뽑아낸다.
+// 이 학원 시간표는 주마다 반·시간이 바뀌기 때문에, 기존 "반명/과목" 표 형식과는 완전히 다른 구조를 따로 읽는다.
+// 주 구분 칸("26년 4월 1주(3월 30일 - 5월 1일)" 같은 문구)을 기준으로 블록을 나누고, 그 아래 요일(월~일) 줄에서
+// 그 주에 실제로 쓰인 요일별 칸 위치를 매번 새로 찾는다(주마다 배치가 달라짐 — 토·일 특강 주도 같은 방식으로 인식됨).
+// 병합된 셀은 왼쪽 위 값을 그대로 따르고, 셀 주소는 항상 절대 좌표(A1 방식)로 직접 읽는다 — sheet_to_json의 배열
+// 인덱스는 시트마다 실제 사용범위 시작 열이 달라(A열부터인 시트도, B열부터인 시트도 있음) 그대로 쓰면 열이 밀려버린다.
+// ⚠ 이 함수와 그 결과(store.weeklyTimetable.icon)는 아이콘 전용이며 이베스트 자료와 절대 섞이지 않는다.
+// 주별 시간표 한 주 분량을 표로 그려준다 — parseIconWeeklyTimetable()이 뽑아낸 결과를 그대로 사용
+function renderWeeklyTimetableTable(week){
+  if(!week) return '<div style="font-size:.82rem;color:#8b93a7">자료 없음</div>';
+  const days=['월','화','수','목','금','토','일'].filter(d=>week.dayCols&&week.dayCols[d]&&week.dayCols[d].length);
+  if(!days.length) return '<div style="font-size:.82rem;color:#8b93a7">자료 없음</div>';
+  const blocks=[]; const seen=new Set();
+  (week.entries||[]).forEach(e=>{ if(!seen.has(e.timeBlock)){ seen.add(e.timeBlock); blocks.push(e.timeBlock); } });
+  let h=`<div style="font-size:.76rem;color:var(--sub);margin-bottom:6px">${esc(week.start||'')}${week.end?' ~ '+esc(week.end):''}</div>`;
+  h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.76rem">';
+  h+='<thead><tr><th style="border:1px solid var(--line);padding:6px;background:#f6f8fc;white-space:nowrap">시간</th>';
+  days.forEach(d=>{ week.dayCols[d].forEach((c,i)=>{ h+=`<th style="border:1px solid var(--line);padding:6px;background:#f6f8fc">${esc(d)}${week.dayCols[d].length>1?' '+(i+1):''}</th>`; }); });
+  h+='</tr></thead><tbody>';
+  blocks.forEach(b=>{
+    h+=`<tr><td style="border:1px solid var(--line);padding:6px;font-weight:700;white-space:pre-line">${esc(b)}</td>`;
+    days.forEach(d=>{
+      week.dayCols[d].forEach(c=>{
+        const es=(week.entries||[]).filter(e=>e.day===d&&e.col===c&&e.timeBlock===b);
+        const txt=es.map(e=>e.className+(e.subject?' · '+e.subject:'')).join(', ');
+        h+=`<td style="border:1px solid var(--line);padding:6px">${esc(txt)}</td>`;
+      });
+    });
+    h+='</tr>';
+  });
+  h+='</tbody></table></div>';
+  return h;
+}
+
+function parseIconWeeklyTimetable(wb){
+  const weeks={}; const sheets=[];
+  wb.SheetNames.forEach(sn=>{
+    if(!/시간표/.test(sn)) return;
+    const ws=wb.Sheets[sn]; if(!ws||!ws['!ref']) return;
+    const range=XLSX.utils.decode_range(ws['!ref']);
+    const merges=ws['!merges']||[];
+    const cellVal=(r,c)=>{
+      for(const m of merges){
+        if(r>=m.s.r&&r<=m.e.r&&c>=m.s.c&&c<=m.e.c){
+          const cell=ws[XLSX.utils.encode_cell({r:m.s.r,c:m.s.c})];
+          return cell&&cell.v!=null?cell.v:'';
+        }
+      }
+      const cell=ws[XLSX.utils.encode_cell({r,c})];
+      return cell&&cell.v!=null?cell.v:'';
+    };
+    const minR=range.s.r, maxR=range.e.r, minC=range.s.c, maxC=range.e.c;
+    // "주(...)" 라벨이 있는 열을 시트 왼쪽에서 찾는다(시트마다 A열부터 시작하기도, B열부터 시작하기도 함)
+    let labelCol=-1;
+    for(let c=minC;c<=Math.min(minC+3,maxC);c++){
+      for(let r=minR;r<=maxR;r++){
+        if(/주\(/.test(String(cellVal(r,c)||''))){ labelCol=c; break; }
+      }
+      if(labelCol>=0) break;
+    }
+    if(labelCol<0) return;
+    let sheetWeeks=0;
+    for(let r=minR;r<=maxR;r++){
+      const label=String(cellVal(r,labelCol)||'').trim();
+      if(!/주\(/.test(label)) continue;
+      if(r>minR && String(cellVal(r-1,labelCol)||'').trim()===label) continue; // 같은 주 라벨이 이어지는 병합행 — 이미 처리한 라벨은 건너뜀
+      let hr=r;
+      while(hr+1<=maxR && String(cellVal(hr+1,labelCol)||'').trim()===label) hr++;
+      const dayRow=hr+1;
+      const dayCols={};
+      for(let c=labelCol+1;c<=maxC;c++){
+        const dv=String(cellVal(dayRow,c)||'').trim();
+        if(['월','화','수','목','금','토','일'].includes(dv)){ (dayCols[dv]=dayCols[dv]||[]).push(c); }
+      }
+      if(!Object.keys(dayCols).length) continue; // 요일 줄을 못 찾은 블록(형식이 다른 경우)은 건너뜀
+      // 날짜 범위 추출: "26년 4월 1주(3월 30일 - 5월 1일)" 형식
+      // "3월 30일 - 5월 1일"처럼 끝 월이 있는 경우와 "12월 15일-26일"처럼 끝 월 표기가 생략된(시작 월과 같은) 경우 둘 다 인식
+      const dm=label.match(/\((\d{1,2})월\s*(\d{1,2})일\s*-\s*(?:(\d{1,2})월\s*)?(\d{1,2})일\)/);
+      const ym=label.match(/(\d{2,4})년/);
+      let start='', end='';
+      if(dm){
+        const year=ym?(ym[1].length===2?'20'+ym[1]:ym[1]):String(new Date().getFullYear());
+        const startMonth=+dm[1], endMonth=dm[3]?+dm[3]:+dm[1]; // 끝 월 생략 시 시작 월과 같은 달로 간주
+        let endYear=year;
+        if(endMonth<startMonth) endYear=String(+year+1); // 12월→1월처럼 해를 넘기는 주
+        start=year+'-'+String(startMonth).padStart(2,'0')+'-'+String(+dm[2]).padStart(2,'0');
+        end=endYear+'-'+String(endMonth).padStart(2,'0')+'-'+String(+dm[4]).padStart(2,'0');
+      }
+      // 시간대별 행 스캔(다음 주 블록이 시작되기 전까지)
+      const entries=[];
+      let rr=dayRow+1, prevLabel=null;
+      while(rr<=maxR){
+        const b=String(cellVal(rr,labelCol)||'').trim();
+        if(/주\(/.test(b)) break;
+        if(!b){ rr++; prevLabel=null; continue; }
+        if(b===prevLabel){ rr++; continue; } // 같은 시간대 블록이 여러 줄에 걸쳐 병합된 경우 — 첫 줄만 처리
+        prevLabel=b;
+        for(const day in dayCols){
+          dayCols[day].forEach(c=>{
+            const cell=String(cellVal(rr,c)||'').trim();
+            if(!cell || cell==='시험' || /^클리닉/.test(cell)) return;
+            const parts=cell.split('\n').map(s=>s.trim()).filter(Boolean);
+            const className=parts[0]||'';
+            if(!className) return;
+            entries.push({day, col:c, timeBlock:b, className, daysStr:parts[1]||'', subject:parts[2]||''});
+          });
+        }
+        rr++;
+      }
+      if(!entries.length) continue;
+      const weekKey=start||('sheet:'+sn+':'+r);
+      weeks[weekKey]={label, start, end, dayCols, entries, sourceSheet:sn, updatedAt:Date.now()};
+      sheetWeeks++;
+    }
+    if(sheetWeeks) sheets.push(sn+' ('+sheetWeeks+'주)');
+  });
+  return {weeks, sheets};
+}
+
 function bindSet(){
   const v=document.getElementById('view');
   v.querySelectorAll('[data-dupdel]').forEach(b=>b.onclick=()=>{
@@ -5948,6 +6197,30 @@ function bindSet(){
     const [a,m,id]=b.dataset.dupdel.split('|');
     deleteClassAction(a,m,id);
   });
+  const wtSel=v.querySelector('#wtWeekSel');
+  if(wtSel) wtSel.onchange=()=>{
+    const wk=((store.weeklyTimetable&&store.weeklyTimetable.icon)||{})[wtSel.value];
+    const box=v.querySelector('#wtWeekView'); if(box) box.innerHTML=renderWeeklyTimetableTable(wk);
+  };
+  const backfillBtn=v.querySelector('#backfillStudentsBtn');
+  if(backfillBtn) backfillBtn.onclick=()=>{
+    const {created}=backfillStudentsFromRosters();
+    save(); render(true);
+    alert(created?`학생 명단에 ${created}명을 새로 채워넣었습니다.`:'채울 항목이 없습니다.');
+  };
+  const ghostDelAll=v.querySelector('#ghostDelAll');
+  if(ghostDelAll) ghostDelAll.onclick=()=>{
+    const ghosts=findGhostRosterEntries();
+    if(!ghosts.length) return;
+    if(!confirm(`더미로 남은 학생 ${ghosts.length}건을 반 명단에서 전부 제거할까요?`)) return;
+    ghosts.forEach(g=>{
+      const arr=editArr(g.academy, g.month);
+      const c=arr.find(x=>x._id===g.classId); if(!c || !c.students) return;
+      const idx=c.students.indexOf(g.sname);
+      if(idx>=0){ c.students.splice(idx,1); c.count=c.students.length; c.updatedAt=Date.now(); }
+    });
+    save(); render(true);
+  };
   v.querySelectorAll('[data-ghostdel]').forEach(b=>b.onclick=()=>{
     if(!isAdminRole())return;
     const [a,m,id,sname]=b.dataset.ghostdel.split('|');
@@ -6032,11 +6305,27 @@ function bindSet(){
           store.calendar=keep.concat(yearly['_calendar'].filter(ev=>ev.a==='all'||ev.a===UPFILTER));
         } else store.calendar=yearly['_calendar'];
       }
+      const backfill=backfillStudentsFromRosters(); // 반 명단에만 있고 학생명단엔 없는 이름을 자동으로 채워준다
+      // 아이콘 전용 주별 시간표 인식 — 이베스트를 업로드 중일 땐(UPFILTER==='ebest') 절대 건드리지 않는다
+      let wtWeeks=0, wtSkipReason='';
+      if(UPFILTER==='ebest'){
+        wtSkipReason=' (이베스트 업로드라서 건너뜀)';
+      } else {
+        const {weeks:wtWeeksObj, sheets:wtSheets}=parseIconWeeklyTimetable(wb);
+        const wkKeys=Object.keys(wtWeeksObj);
+        if(wkKeys.length){
+          wkKeys.forEach(k=>{ store.weeklyTimetable.icon[k]=wtWeeksObj[k]; });
+          wtWeeks=wkKeys.length;
+        }
+      }
       save(); refreshMonthSel(); render();
       let msg='업로드 완료!\n';
       msg+=ks.map(k=>{const[m,a]=k.split('|');return `· ${mLabel(m)} ${AC[a].label}: ${found[k].length}개 반`;}).join('\n');
       if(yks.length) msg+='\n· 연간교재 '+yks.length+'칸 반영';
       if(calN) msg+='\n· 학사일정 '+calN+'건 반영';
+      if(backfill.created) msg+='\n· 학생 명단에 없던 학생 '+backfill.created+'명을 반 명단 기준으로 자동 추가';
+      if(wtWeeks) msg+='\n· 아이콘 주별 시간표 '+wtWeeks+'주 반영 (설정 화면에서 확인 가능)';
+      else if(wtSkipReason) msg+='\n· 아이콘 주별 시간표'+wtSkipReason;
       if(skipped.length) msg+='\n\n건너뛴 시트: '+skipped.join(', ');
       alert(msg);
       UPFILTER=null;
@@ -6090,8 +6379,7 @@ function bindSet(){
   v.querySelectorAll('[data-wbdel]').forEach(b=>b.onclick=()=>{
     if(!isAdminRole())return;
     const i=Number(b.dataset.wbdel);
-    if(!store.wordbookOptions||!store.wordbookOptions.length) store.wordbookOptions=[...WORDBOOK_OPTIONS_DEFAULT];
-    store.wordbookOptions.splice(i,1);
+    const _wb=[...wbOptionsFor(MODE)]; _wb.splice(i,1); setWbOptions(MODE,_wb);
     save(); render(true);
   });
   const wbAddBtn=v.querySelector('#wbAddBtn');
@@ -6099,15 +6387,13 @@ function bindSet(){
     if(!isAdminRole())return;
     const inp=v.querySelector('#wbAddIn'); const val=(inp&&inp.value||'').trim();
     if(!val) return;
-    if(!store.wordbookOptions||!store.wordbookOptions.length) store.wordbookOptions=[...WORDBOOK_OPTIONS_DEFAULT];
-    if(!store.wordbookOptions.includes(val)) store.wordbookOptions.push(val);
+    const _wb=[...wbOptionsFor(MODE)]; if(!_wb.includes(val)) _wb.push(val); setWbOptions(MODE,_wb);
     save(); render(true);
   };
   v.querySelectorAll('[data-tpdel]').forEach(b=>b.onclick=()=>{
     if(!isAdminRole())return;
     const i=Number(b.dataset.tpdel);
-    if(!store.testPaperOptions) store.testPaperOptions=[];
-    store.testPaperOptions.splice(i,1);
+    const _tp=[...tpOptionsFor(MODE)]; _tp.splice(i,1); setTpOptions(MODE,_tp);
     save(); render(true);
   });
   const tpAddBtn=v.querySelector('#tpAddBtn');
@@ -6115,8 +6401,7 @@ function bindSet(){
     if(!isAdminRole())return;
     const inp=v.querySelector('#tpAddIn'); const val=(inp&&inp.value||'').trim();
     if(!val) return;
-    if(!store.testPaperOptions) store.testPaperOptions=[];
-    if(!store.testPaperOptions.includes(val)) store.testPaperOptions.push(val);
+    const _tp=[...tpOptionsFor(MODE)]; if(!_tp.includes(val)) _tp.push(val); setTpOptions(MODE,_tp);
     save(); render(true);
   };
   const exp=v.querySelector('#exp');
