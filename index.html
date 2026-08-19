@@ -415,7 +415,7 @@ if(!store.weeklyTimetable.icon) store.weeklyTimetable.icon={};
 const SHARE_FIELDS=['uploads','bookedit','bookdone','daysedit','timeedit','calendar','meetings','teachers','adminEmail','enrollment','newStudents','students','admissionConsults','wordTests','attend','homework','stayback','bookGiven','uploadTombstones','uploadStamps','wordbookOptions','testPaperOptions','giveSel','consultRequests','records','assign','cmemo','worklog','weekplan','submits','handover','boardPosts','weeklyTimetable'];
 // 반 자료·학생 명단처럼 "삭제"가 중요한 항목은 병합하지 않고 통째로 교체한다(마지막 저장이 우선).
 // 병합 방식(mergeById)에는 삭제라는 개념이 없어서, 지운 반·학생이 다른 기기 자료와 합쳐지며 계속 되살아나기 때문.
-const REPLACE_FIELDS=['uploads','students','teachers','bookedit','bookdone','daysedit','timeedit','wordbookOptions','testPaperOptions'];
+const REPLACE_FIELDS=['uploads','students','teachers','bookedit','bookdone','daysedit','timeedit','wordbookOptions','testPaperOptions','weeklyTimetable']; // weeklyTimetable도 '삭제'가 있는 자료라 병합이 아니라 통째교체 방식이어야 한다 — 안 그러면 지운 주가 다음 동기화 때 서버에서 다시 살아난다
 // 출결·숙제 등은 여러 선생님이 동시에 서로 다른 학생을 입력하므로 기존처럼 병합해야 안전하다.
 function isReplaceField(f){ return REPLACE_FIELDS.includes(f); }
 // 각 항목을 마지막으로 편집한 시각 — 교체 방식에서 "누가 더 최신인지" 판단에 사용
@@ -6090,6 +6090,44 @@ function parseWorkbook(wb){
 // ⚠ 이 함수와 그 결과(store.weeklyTimetable.icon)는 아이콘 전용이며 이베스트 자료와 절대 섞이지 않는다.
 // 주별 시간표 한 주 분량을 표로 그려준다 — parseIconWeeklyTimetable()이 뽑아낸 결과를 그대로 사용
 // 주별 시간표를 엑셀로 다운로드 — onlyKey를 주면 그 주만, 안 주면 저장된 모든 주를 각 시트로 담는다
+// 원본 엑셀처럼 반별 색상을 살려서 다운로드 — 실제 xlsx 이진 포맷의 셀 색칠 저장은 이 앱에 들어있는 무료 엑셀 라이브러리가 지원하지 않아서,
+// 대신 엑셀이 그대로 열어서 색을 인식하는 HTML표 방식(.xls)으로 만든다.
+function downloadWeeklyTimetableColored(onlyKey){
+  const wtWeeks=(store.weeklyTimetable&&store.weeklyTimetable.icon)||{};
+  const keys=(onlyKey?[onlyKey]:Object.keys(wtWeeks).sort()).filter(k=>wtWeeks[k]);
+  if(!keys.length){ alert('다운로드할 주별 시간표가 없습니다.'); return; }
+  let body='';
+  keys.forEach(k=>{
+    const week=wtWeeks[k];
+    const days=['월','화','수','목','금','토','일'].filter(d=>week.dayCols&&week.dayCols[d]&&week.dayCols[d].length);
+    if(!days.length) return;
+    const blocks=[]; const seen=new Set();
+    (week.entries||[]).forEach(e=>{ if(!seen.has(e.timeBlock)){ seen.add(e.timeBlock); blocks.push(e.timeBlock); } });
+    body+=`<h3 style="font-family:sans-serif">${esc(week.label||k)}</h3>`;
+    body+=`<table border="1" style="border-collapse:collapse;font-family:sans-serif;font-size:12px" cellpadding="5">`;
+    body+='<tr><th style="background:#f6f8fc">시간</th>';
+    days.forEach(d=>{ week.dayCols[d].forEach((c,i)=>{ body+=`<th style="background:#f6f8fc">${esc(d)}${week.dayCols[d].length>1?' '+(i+1):''}</th>`; }); });
+    body+='</tr>';
+    blocks.forEach(b=>{
+      body+=`<tr><td style="font-weight:bold">${esc(String(b||'').replace(/\n+/g,' '))}</td>`;
+      days.forEach(d=>{
+        week.dayCols[d].forEach(c=>{
+          const es=(week.entries||[]).filter(e=>e.day===d&&e.col===c&&e.timeBlock===b);
+          const bg=(es[0]&&es[0].color)?('#'+es[0].color):'';
+          const txt=es.map(e=>e.className+(e.subject?' · '+e.subject:'')).join(', ');
+          body+=`<td${bg?` style="background:${bg}"`:''}>${esc(txt)}</td>`;
+        });
+      });
+      body+='</tr>';
+    });
+    body+='</table><br><br>';
+  });
+  const html=`<html><head><meta charset="UTF-8"></head><body>${body}</body></html>`;
+  const blob=new Blob(['﻿'+html],{type:'application/vnd.ms-excel'});
+  const u=URL.createObjectURL(blob); const el=document.createElement('a');
+  el.href=u; el.download='아이콘_주별시간표_'+(onlyKey||'전체')+'_'+todayISO()+'.xls'; el.click(); URL.revokeObjectURL(u);
+}
+
 function downloadWeeklyTimetableXlsx(onlyKey){
   const wtWeeks=(store.weeklyTimetable&&store.weeklyTimetable.icon)||{};
   const keys=onlyKey?[onlyKey]:Object.keys(wtWeeks).sort();
@@ -6172,6 +6210,17 @@ function parseIconWeeklyTimetable(wb){
       const cell=ws[XLSX.utils.encode_cell({r,c})];
       return cell&&cell.v!=null?cell.v:'';
     };
+    // 반마다 원본 엑셀에 칠해둔 배경색을 그대로 읽어와서(다운로드할 때 원본처럼 색을 살리는 용도) 저장해둔다
+    const cellColor=(r,c)=>{
+      const findCell=(rr,cc)=>{
+        for(const m of merges){ if(rr>=m.s.r&&rr<=m.e.r&&cc>=m.s.c&&cc<=m.e.c) return ws[XLSX.utils.encode_cell({r:m.s.r,c:m.s.c})]; }
+        return ws[XLSX.utils.encode_cell({r:rr,c:cc})];
+      };
+      const cell=findCell(r,c);
+      const rgb=cell&&cell.s&&cell.s.patternType==='solid'&&cell.s.fgColor&&cell.s.fgColor.rgb;
+      if(!rgb || /^FFFFFF$|^00000000$/i.test(rgb)) return ''; // 흰색·색없음은 무시
+      return rgb.length===8?rgb.slice(2):rgb; // ARGB면 알파 제거하고 RGB만
+    };
     const minR=range.s.r, maxR=range.e.r, minC=range.s.c, maxC=range.e.c;
     // "주(...)" 라벨이 있는 열을 시트 왼쪽에서 찾는다(시트마다 A열부터 시작하기도, B열부터 시작하기도 함)
     let labelCol=-1;
@@ -6182,6 +6231,11 @@ function parseIconWeeklyTimetable(wb){
       if(labelCol>=0) break;
     }
     if(labelCol<0) return;
+    // 시트 이름(예: "(26)8월|시간표")에 적힌 달과, 그 안의 주(週) 라벨이 말하는 달이 서로 다르면
+    // 원본 파일에 오래된 내용을 복사해놓고 안 고친 실수일 가능성이 높다 — 조용히 아무 쪽으로 우선순위를
+    // 정해 덮어쓰지 않고, 라벨에 적힌 그대로 저장하되 업로드 결과 메시지에 경고로 알려준다.
+    const snMonthMatch=sn.match(/\((\d{2,4})\)\s*(\d{1,2})월/);
+    const sheetMonth=snMonthMatch?+snMonthMatch[2]:null;
     let sheetWeeks=0;
     for(let r=minR;r<=maxR;r++){
       const label=String(cellVal(r,labelCol)||'').trim();
@@ -6203,10 +6257,22 @@ function parseIconWeeklyTimetable(wb){
       const ym=label.match(/(\d{2,4})년/);
       let start='', end='';
       if(dm){
-        const year=ym?(ym[1].length===2?'20'+ym[1]:ym[1]):String(new Date().getFullYear());
-        const startMonth=+dm[1], endMonth=dm[3]?+dm[3]:+dm[1]; // 끝 월 생략 시 시작 월과 같은 달로 간주
+        // 시트 이름(예: "(26)8월|시간표")에 달이 적혀있으면 그걸 기준으로 삼는다 — 실제 학원 자료에서 주 라벨 안의
+        // "◯월" 글자가 예전 걸 복사해온 채로 안 바뀐 경우가 있는데, 그래도 시트 이름 쪽이 그 파일이 실제로 어느 달
+        // 자료인지 학원 측이 의도적으로 붙인 것이라 더 믿을 수 있다(사용자 확인).
+        const labelStartMonth=+dm[1], labelEndMonth=dm[3]?+dm[3]:+dm[1];
+        const monthOffset=labelEndMonth-labelStartMonth; // 보통 0(한 달 안) 또는 1(다음 달로 넘어감)
+        let year, startMonth, endMonth;
+        if(sheetMonth!=null){
+          year=snMonthMatch[1].length===2?'20'+snMonthMatch[1]:snMonthMatch[1];
+          startMonth=sheetMonth; endMonth=sheetMonth+monthOffset;
+        } else {
+          year=ym?(ym[1].length===2?'20'+ym[1]:ym[1]):String(new Date().getFullYear());
+          startMonth=labelStartMonth; endMonth=labelEndMonth;
+        }
         let endYear=year;
-        if(endMonth<startMonth) endYear=String(+year+1); // 12월→1월처럼 해를 넘기는 주
+        if(endMonth>12){ endMonth-=12; endYear=String(+year+1); }
+        else if(endMonth<startMonth) endYear=String(+year+1); // 12월→1월처럼 해를 넘기는 주
         start=year+'-'+String(startMonth).padStart(2,'0')+'-'+String(+dm[2]).padStart(2,'0');
         end=endYear+'-'+String(endMonth).padStart(2,'0')+'-'+String(+dm[4]).padStart(2,'0');
       }
@@ -6226,14 +6292,14 @@ function parseIconWeeklyTimetable(wb){
             const parts=cell.split('\n').map(s=>s.trim()).filter(Boolean);
             const className=parts[0]||'';
             if(!className) return;
-            entries.push({day, col:c, timeBlock:b, className, daysStr:parts[1]||'', subject:parts[2]||''});
+            entries.push({day, col:c, timeBlock:b, className, daysStr:parts[1]||'', subject:parts[2]||'', color:cellColor(rr,c)});
           });
         }
         rr++;
       }
       if(!entries.length) continue;
       const weekKey=start||('sheet:'+sn+':'+r);
-      weeks[weekKey]={label, start, end, dayCols, entries, sourceSheet:sn, updatedAt:Date.now()};
+      weeks[weekKey]={label, start, end, dayCols, entries, sourceSheet:sn, sheetMonth, updatedAt:Date.now()};
       sheetWeeks++;
     }
     if(sheetWeeks) sheets.push(sn+' ('+sheetWeeks+'주)');
@@ -6259,21 +6325,22 @@ function bindSet(){
     const f=wtUpFile.files[0]; if(!f) return;
     const r=new FileReader();
     r.onload=()=>{ try{
-      const wb=XLSX.read(new Uint8Array(r.result),{type:'array'});
+      const wb=XLSX.read(new Uint8Array(r.result),{type:'array',cellStyles:true}); // cellStyles:true — 반별 색상까지 같이 읽어와서 다운로드할 때 원본처럼 색을 살릴 수 있도록
       const {weeks, sheets}=parseIconWeeklyTimetable(wb);
       const wkKeys=Object.keys(weeks);
       if(!wkKeys.length){ alert('이 파일에서 시간표를 찾지 못했습니다.\n시트 이름에 「시간표」가 들어있고, 그 안에 「◯월 ◯주(◯월 ◯일 - ◯월 ◯일)」 형식의 주 구분이 있어야 인식됩니다.'); return; }
       store.weeklyTimetable.icon=store.weeklyTimetable.icon||{};
       wkKeys.forEach(k=>{ store.weeklyTimetable.icon[k]=weeks[k]; });
       save(); render(true);
-      alert(`주별 시간표 ${wkKeys.length}주 반영 완료!\n`+wkKeys.map(k=>'· '+(weeks[k].label||k)).join('\n'));
+      const msg=`주별 시간표 ${wkKeys.length}주 반영 완료!\n`+wkKeys.map(k=>'· '+(weeks[k].label||k)).join('\n');
+      alert(msg);
     }catch(e){ alert('엑셀 파일을 읽지 못했습니다: '+e.message); } };
     r.readAsArrayBuffer(f);
   };
   const wtWeekDl=v.querySelector('#wtWeekDl');
-  if(wtWeekDl) wtWeekDl.onclick=()=>{ const k=wtSel?wtSel.value:null; if(k) downloadWeeklyTimetableXlsx(k); };
+  if(wtWeekDl) wtWeekDl.onclick=()=>{ const k=wtSel?wtSel.value:null; if(k) downloadWeeklyTimetableColored(k); };
   const wtAllDl=v.querySelector('#wtAllDl');
-  if(wtAllDl) wtAllDl.onclick=()=>downloadWeeklyTimetableXlsx();
+  if(wtAllDl) wtAllDl.onclick=()=>downloadWeeklyTimetableColored();
   const wtWeekDel=v.querySelector('#wtWeekDel');
   if(wtWeekDel) wtWeekDel.onclick=()=>{
     const wtWeeksNow=(store.weeklyTimetable&&store.weeklyTimetable.icon)||{};
@@ -6371,7 +6438,7 @@ function bindSet(){
     const f=upFile.files[0]; if(!f) return;
     const r=new FileReader();
     r.onload=()=>{ try{
-      const wb=XLSX.read(new Uint8Array(r.result),{type:'array'});
+      const wb=XLSX.read(new Uint8Array(r.result),{type:'array',cellStyles:true}); // cellStyles:true — 반별 색상까지 같이 읽어와서 다운로드할 때 원본처럼 색을 살릴 수 있도록
       const {found,yearly,skipped}=parseWorkbook(wb);
       const ks=Object.keys(found);
       const yks=Object.keys(yearly).filter(k=>!k.startsWith('_count_')&&k!=='_calendar');
