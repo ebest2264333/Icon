@@ -366,6 +366,9 @@ if(store.adminEmail==null) store.adminEmail='';
 if(!store.daysedit) store.daysedit={};
 if(!store.calendar) store.calendar=[];
 if(!store.meetings) store.meetings=[];
+// [수정] meetings는 이베스트·아이콘이 공용 서버 자료(SHARE_FIELDS)를 같이 쓰기 때문에, 이 학원 전용 화면(단일 학원 파일)에서는
+// 다른 학원 것까지 전부 섞여서 알림·목록에 뜨는 문제가 있었다 — 이 학원(MODE) 것과 "공통"(a 없음/all)만 걸러서 보여준다.
+function meetingsForAcademy(){ return store.meetings.filter(m=>!m.a||m.a==='all'||m.a===MODE); }
 if(!store.meetingReadIds) store.meetingReadIds={}; // 기기별 로컬 읽음 표시 (동기화 대상 아님)
 if(!store.sync) store.sync={url:'https://ebest-b41ce-default-rtdb.asia-southeast1.firebasedatabase.app',code:'icon-3s3t5o2u6q1e2nux6r1y1l3w',on:true}; // 새 기기에서 열면 자동으로 동기화 연결됨 (배포 편의를 위한 의도된 동작)
 else { if(!store.sync.url) store.sync.url='https://ebest-b41ce-default-rtdb.asia-southeast1.firebasedatabase.app'; if(!store.sync.code) store.sync.code='icon-3s3t5o2u6q1e2nux6r1y1l3w'; if(store.sync.on==null) store.sync.on=true; }
@@ -3544,7 +3547,7 @@ function todoCard(list){
     }
   }
   h2+='</div>';
-  const mts=[...store.meetings].sort((x,y)=>y.date.localeCompare(x.date));
+  const mts=[...meetingsForAcademy()].sort((x,y)=>y.date.localeCompare(x.date));
   if(mts.length){
     h2+=`<div class="todogo" data-tab="cal" style="background:#fff;border:1px solid var(--line);border-radius:12px;padding:9px 14px;margin-bottom:16px;font-size:.83rem;color:var(--sub);cursor:pointer">🗒 <b style="color:var(--ink)">${esc(mts[0].title||'주간회의')}</b> · ${mts[0].date} — 눌러서 보기</div>`;
   }
@@ -5292,7 +5295,7 @@ function identityKey(){ const lt=loginTeacher(); return lt? lt.a+'|'+lt.i : 'adm
 function unreadMeetings(){
   const key=identityKey();
   const read=new Set(store.meetingReadIds[key]||[]);
-  return store.meetings.filter(m=>!read.has(m.id));
+  return meetingsForAcademy().filter(m=>!read.has(m.id));
 }
 function markMeetingsRead(ids){
   const key=identityKey();
@@ -5307,7 +5310,7 @@ function renderBell(){
   const un=unreadMeetings();
   badge.style.display=un.length?'':'none';
   badge.textContent=un.length>9?'9+':String(un.length);
-  const sorted=[...store.meetings].sort((x,y)=>y.date.localeCompare(x.date));
+  const sorted=[...meetingsForAcademy()].sort((x,y)=>y.date.localeCompare(x.date));
   if(!sorted.length){ panel.innerHTML='<div style="padding:14px;font-size:.82rem;color:var(--sub)">등록된 회의록이 없습니다.</div>'; return; }
   panel.innerHTML=`<div style="font-weight:800;padding:9px 12px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:.86rem">
       <span>🗒 주간 회의록</span>${un.length?'<button class="btn small" id="bellReadAll" style="font-size:.7rem;padding:3px 8px">모두 확인</button>':''}</div>`
@@ -5324,7 +5327,7 @@ function renderBell(){
       </div>`;
     }).join('');
   const all=panel.querySelector('#bellReadAll');
-  if(all) all.onclick=()=>{ markMeetingsRead(store.meetings.map(m=>m.id)); renderBell(); };
+  if(all) all.onclick=()=>{ markMeetingsRead(meetingsForAcademy().map(m=>m.id)); renderBell(); };
   panel.querySelectorAll('.bellReadOne').forEach(b=>b.onclick=()=>{ markMeetingsRead([Number(b.dataset.id)||b.dataset.id]); renderBell(); });
 }
 function renderCal(){
@@ -5377,7 +5380,7 @@ function renderCal(){
     </div>
     <div style="font-size:.72rem;color:#8b93a7;margin-top:4px">이미지는 자동으로 용량을 줄여서 첨부돼요. 파일은 5MB 이하만 가능합니다.</div>
     <div style="margin-top:8px"><button class="btn primary" id="mtAdd">회의록 등록</button></div></div>`;
-  const mts=[...store.meetings].sort((x,y)=>y.date.localeCompare(x.date));
+  const mts=[...meetingsForAcademy()].sort((x,y)=>y.date.localeCompare(x.date));
   if(!mts.length) h+='<div style="font-size:.83rem;color:#8b93a7">등록된 회의록이 없습니다.</div>';
   mts.forEach(mt=>{
     h+=`<div class="mypanel" style="border-top-color:#5a6478;margin-bottom:12px">
@@ -5451,7 +5454,7 @@ function bindCal(){
   if(ma) ma.onclick=()=>{
     const body=v.querySelector('#mtBody').value.trim();
     if(!body){ alert('회의 내용을 입력해주세요.'); return; }
-    store.meetings.push({id:Date.now(), date:v.querySelector('#mtDate').value||todayISO(),
+    store.meetings.push({id:Date.now(), date:v.querySelector('#mtDate').value||todayISO(), a:MODE,
       host:v.querySelector('#mtHost').value.trim(), att:v.querySelector('#mtAtt').value.trim(),
       title:v.querySelector('#mtTitle').value.trim(), body, attachments:state.mtPendingAttachments||[]});
     state.mtPendingAttachments=[];
@@ -5568,7 +5571,7 @@ function repCal(){
     h+=`<tr>${rTD('<b>'+ev.start+(ev.end&&ev.end!==ev.start?' ~ '+ev.end:'')+'</b>',z+'white-space:nowrap')}${rTD(`<b style="color:${CAL_COLORS[ev.cat]}">${esc(ev.cat)}</b>`,z+'text-align:center')}${rTD(esc(ev.title),z)}${rTD(ev.a==='all'?'공통':AC[ev.a].label,z+'text-align:center')}</tr>`;});
   if(!evs.length) h+=`<tr>${rTD('등록된 일정 없음','color:#8b93a7')}</tr>`;
   h+='</table>';
-  const mts=[...store.meetings].sort((x,y)=>y.date.localeCompare(x.date));
+  const mts=[...meetingsForAcademy()].sort((x,y)=>y.date.localeCompare(x.date));
   h+=`<div style="font-weight:bold;font-size:11pt;margin:12px 0 6px;${rF}">주간 회의록</div>`;
   mts.forEach(mt=>{
     h+=`<table style="width:100%;border-collapse:collapse;${rF};margin-bottom:8px;page-break-inside:avoid">
